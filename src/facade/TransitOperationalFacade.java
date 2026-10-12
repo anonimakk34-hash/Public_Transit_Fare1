@@ -14,41 +14,68 @@ public class TransitOperationalFacade {
     private final TapRepository tapRepo;
 
     // Subsystem B (Processing)
-    private final DiscountEngine discountEngine = new DiscountEngine();
+    private final DiscountEngine discountEngine;
     private final FareRepository fareRepo;
 
     // Subsystem C (Finalization)
-    private final BalanceManager balanceManager = new BalanceManager();
+    private final BalanceManager balanceManager;
     private final LedgerRepository ledgerRepo;
 
     public TransitOperationalFacade() {
         this(new TapRepository(), new FareRepository(), new LedgerRepository());
     }
 
-    /** Repositories are injectable so tests can use temp files and simulate a restart. */
     public TransitOperationalFacade(TapRepository tapRepo, FareRepository fareRepo, LedgerRepository ledgerRepo) {
+        this(tapRepo, fareRepo, ledgerRepo, new DiscountEngine(), new BalanceManager());
+    }
+
+    /** Everything is injectable: tests use temp files, and the engine/manager carry the fault switches. */
+    public TransitOperationalFacade(TapRepository tapRepo, FareRepository fareRepo, LedgerRepository ledgerRepo,
+                                    DiscountEngine discountEngine, BalanceManager balanceManager) {
         this.tapRepo = tapRepo;
         this.fareRepo = fareRepo;
         this.ledgerRepo = ledgerRepo;
+        this.discountEngine = discountEngine;
+        this.balanceManager = balanceManager;
     }
 
-    public void processJourney(String cardId) {
+    /** Adds money to a card. Returns the new balance. */
+    public double topUp(String cardId, double amount) {
+        String card = validator.validateCardId(cardId);
+        ledgerRepo.saveTransaction(balanceManager.createTopUp(UUID.randomUUID().toString(), card, amount));
+        return getBalance(card);
+    }
+
+    /** Balance = committed top-ups minus committed fare deductions, read from the persisted ledger. */
+    public double getBalance(String cardId) {
+        String card = validator.validateCardId(cardId);
+        return balanceManager.balanceOf(card, ledgerRepo.loadTransactionsForCard(card));
+    }
+
+    /**
+     * Runs A -> B -> C for one card and returns the ID of the tap that anchors the chain
+     * (so callers can inspect what ended up on disk).
+     * @throws InvalidCardException if the card is rejected at step A; nothing has been persisted then.
+     */
+    public String processJourney(String cardId) {
         String tapId = UUID.randomUUID().toString();
         System.out.println("Starting journey for card: " + cardId);
 
         // --- STEP A: INTAKE ---
         TapRecord tap = validator.processNewTap(tapId, cardId);
+        String card = tap.getCardId(); // normalized by A; the same ID is used for B and C
         tapRepo.saveTap(tap);
         System.out.println("Step A: Tap validated and saved.");
 
         try {
             // --- STEP B: PROCESSING ---
-            FareCalculation fare = discountEngine.calculateFare(UUID.randomUUID().toString(), tapId, cardId, 100.0);
+            FareCalculation fare = discountEngine.calculateFare(UUID.randomUUID().toString(), tapId, card);
             fareRepo.saveFare(fare);
             System.out.println("Step B: Fare calculated at " + fare.getFinalFare());
 
             // --- STEP C: FINALIZATION ---
-            LedgerTransaction tx = balanceManager.processDeduction(UUID.randomUUID().toString(), tapId, fare.getFinalFare(), cardId);
+            LedgerTransaction tx = balanceManager.processDeduction(UUID.randomUUID().toString(), tapId, card,
+                    fare.getFinalFare(), ledgerRepo.loadTransactionsForCard(card));
             tx.commit();
             ledgerRepo.saveTransaction(tx);
             System.out.println("Step C: Transaction committed.");
@@ -63,6 +90,26 @@ public class TransitOperationalFacade {
             // Which steps need undoing is decided from what is on disk, not from local variables.
             compensate(tapId);
         }
+        return tapId;
+    }
+
+    /**
+     * Manual rollback of one chain, decided from what is on disk. Refuses to touch a chain that
+     * already finished, and does nothing for one that was already compensated.
+     */
+    public String rollbackChain(String tapId) {
+        TapRecord tap = tapRepo.findById(tapId);
+        if (tap == null) {
+            return "No tap with ID " + tapId + " on disk.";
+        }
+        if (tap.getStatus() == TapState.COMPLETED) {
+            return "Refused: chain " + tapId + " is already COMPLETED.";
+        }
+        if (tap.getStatus() == TapState.VOIDED) {
+            return "Nothing to do: chain " + tapId + " was already compensated.";
+        }
+        compensate(tapId);
+        return "Chain " + tapId + " rolled back from persisted state.";
     }
 
     /**

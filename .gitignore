@@ -28,3 +28,10 @@ bin/
 
 ### Mac OS ###
 .DS_Store
+
+target/
+*.iml
+.idea/
+taps.json
+fares.json
+ledger.json

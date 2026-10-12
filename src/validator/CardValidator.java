@@ -2,20 +2,17 @@ package validator;
 
 public class CardValidator {
 
-    public TapRecord processNewTap(String tapId, String cardId) {
+    /** Returns the normalized (trimmed) card ID, or throws if it is missing/blank. */
+    public String validateCardId(String cardId) {
         if (cardId == null || cardId.trim().isEmpty()) {
-            throw new IllegalArgumentException("Card ID is missing or invalid.");
+            throw new InvalidCardException("Card ID is missing or invalid.");
         }
+        return cardId.trim();
+    }
 
-        // 1. Create the entity
-        TapRecord tap = new TapRecord(tapId, cardId);
-
-        // 2. Pure business logic could go here (e.g., checking a blacklist)
-
-        // 3. Enforce the state transition inside the entity
+    public TapRecord processNewTap(String tapId, String cardId) {
+        TapRecord tap = new TapRecord(tapId, validateCardId(cardId));
         tap.validateRecord();
-
-        // 4. Return the valid entity to the Facade
         return tap;
     }
 }

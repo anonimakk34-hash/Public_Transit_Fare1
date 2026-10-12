@@ -70,4 +70,12 @@ public class TapRepository {
             throw new RuntimeException("Failed to read durable storage: " + filePath, e);
         }
     }
+
+    /** Deletes the persisted file (used by the admin reset). */
+    public void clear() {
+        File file = new File(filePath);
+        if (file.exists() && !file.delete()) {
+            throw new RuntimeException("Could not delete durable storage: " + filePath);
+        }
+    }
 }

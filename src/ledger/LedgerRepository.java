@@ -55,6 +55,12 @@ public class LedgerRepository {
                 .orElse(null);
     }
 
+    public List<LedgerTransaction> loadTransactionsForCard(String cardId) {
+        return loadAllTransactions().stream()
+                .filter(t -> cardId.equals(t.getCardId()))
+                .collect(Collectors.toList());
+    }
+
     public List<LedgerTransaction> loadAllTransactions() {
         File file = new File(filePath);
         if (!file.exists()) {
@@ -67,6 +73,14 @@ public class LedgerRepository {
             return transactions != null ? transactions : new ArrayList<>();
         } catch (IOException e) {
             throw new RuntimeException("Failed to read durable storage: " + filePath, e);
+        }
+    }
+
+    /** Deletes the persisted file (used by the admin reset). */
+    public void clear() {
+        File file = new File(filePath);
+        if (file.exists() && !file.delete()) {
+            throw new RuntimeException("Could not delete durable storage: " + filePath);
         }
     }
 }

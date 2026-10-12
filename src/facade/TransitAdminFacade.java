@@ -1,60 +1,113 @@
 package facade;
 
-import validator.TapRepository;
-import validator.TapRecord;
-import calculator.FareRepository;
+import calculator.DiscountEngine;
 import calculator.FareCalculation;
-import java.util.List;
+import calculator.FareRepository;
+import ledger.BalanceManager;
+import ledger.LedgerRepository;
+import ledger.LedgerTransaction;
+import validator.TapRecord;
+import validator.TapRepository;
 
+import java.util.List;
+import java.util.stream.Collectors;
+
+/** Narrow facade for inspection, manual compensation, fault switches and store reset. */
 public class TransitAdminFacade {
 
-    private TapRepository tapRepo = new TapRepository();
-    private FareRepository fareRepo = new FareRepository();
+    private final TapRepository tapRepo;
+    private final FareRepository fareRepo;
+    private final LedgerRepository ledgerRepo;
+    private final DiscountEngine discountEngine;
+    private final BalanceManager balanceManager;
+    private final TransitOperationalFacade operations;
 
-    /**
-     * Inspects the durable state on disk for a specific card (e.g., "CTS-STU-12345").
-     */
-    public void inspectCardHistory(String cardId) {
-        System.out.println("--- Admin Inspection for Card: " + cardId + " ---");
-
-        List<TapRecord> taps = tapRepo.loadAllTaps();
-        System.out.println("Tap History:");
-        taps.stream()
-                .filter(t -> t.getCardId().equals(cardId))
-                .forEach(t -> System.out.println("Tap ID: " + t.getTapId() + " | State: " + t.getStatus()));
-
-        List<FareCalculation> fares = fareRepo.loadAllFares();
-        System.out.println("Fare History:");
-        fares.stream()
-                .filter(f -> f.getCardId().equals(cardId))
-                .forEach(f -> System.out.println("Fare ID: " + f.getCalculationId() + " | State: " + f.getStatus()));
+    public TransitAdminFacade() {
+        this(new TapRepository(), new FareRepository(), new LedgerRepository());
     }
 
-    /**
-     * Manually unwinds a chain that was interrupted by a system shutdown mid-process.
-     */
-    public void forceSystemRollback(String tapId) {
-        System.out.println("Admin forcing rollback for Tap ID: " + tapId);
+    public TransitAdminFacade(TapRepository tapRepo, FareRepository fareRepo, LedgerRepository ledgerRepo) {
+        this(tapRepo, fareRepo, ledgerRepo, new DiscountEngine(), new BalanceManager());
+    }
 
-        // Find and cancel any pending or calculated fares linked to this tap
-        List<FareCalculation> fares = fareRepo.loadAllFares();
-        for (FareCalculation fare : fares) {
-            if (tapId.equals(fare.getTapId()) &&
-                    (fare.getStatus() == calculator.FareState.PENDING || fare.getStatus() == calculator.FareState.CALCULATED)) {
-                fare.cancelCalculation();
-                fareRepo.saveFare(fare);
-                System.out.println("Admin Rollback: Fare forcefully CANCELLED.");
-            }
+    public TransitAdminFacade(TapRepository tapRepo, FareRepository fareRepo, LedgerRepository ledgerRepo,
+                              DiscountEngine discountEngine, BalanceManager balanceManager) {
+        this.tapRepo = tapRepo;
+        this.fareRepo = fareRepo;
+        this.ledgerRepo = ledgerRepo;
+        this.discountEngine = discountEngine;
+        this.balanceManager = balanceManager;
+        this.operations = new TransitOperationalFacade(tapRepo, fareRepo, ledgerRepo, discountEngine, balanceManager);
+    }
+
+    /** Prints every chain on disk for one card, or for all cards when cardId is blank. */
+    public void inspectCardHistory(String cardId) {
+        boolean all = cardId == null || cardId.trim().isEmpty();
+        System.out.println("--- Persisted chains " + (all ? "(all cards)" : "for card " + cardId.trim()) + " ---");
+
+        List<TapRecord> taps = tapRepo.loadAllTaps().stream()
+                .filter(t -> all || t.getCardId().equals(cardId.trim()))
+                .collect(Collectors.toList());
+
+        if (taps.isEmpty()) {
+            System.out.println("(nothing on disk)");
+        } else {
+            taps.forEach(this::printChain);
         }
 
-        // Find and void the intake tap
-        List<TapRecord> taps = tapRepo.loadAllTaps();
-        for (TapRecord tap : taps) {
-            if (tap.getTapId().equals(tapId) && tap.getStatus() == validator.TapState.VALIDATED) {
-                tap.voidRecord();
-                tapRepo.saveTap(tap);
-                System.out.println("Admin Rollback: Tap forcefully VOIDED.");
-            }
+        if (!all) {
+            String card = cardId.trim();
+            System.out.println("Balance of " + card + ": "
+                    + balanceManager.balanceOf(card, ledgerRepo.loadTransactionsForCard(card)));
         }
+    }
+
+    /** Prints the persisted state of a single chain. */
+    public void inspectChain(String tapId) {
+        TapRecord tap = tapRepo.findById(tapId);
+        if (tap == null) {
+            System.out.println("No tap with ID " + tapId + " on disk.");
+            return;
+        }
+        System.out.println("--- Persisted state of chain ---");
+        printChain(tap);
+    }
+
+    /** Manually unwinds one chain using what is persisted (C, then B, then A). */
+    public String forceSystemRollback(String tapId) {
+        return operations.rollbackChain(tapId);
+    }
+
+    // ---- Fault switches (used by the live demo to make B or C fail on demand) ----
+
+    public void setTariffDatabaseDown(boolean down) { discountEngine.setTariffDatabaseDown(down); }
+    public void setLedgerServiceDown(boolean down) { balanceManager.setLedgerServiceDown(down); }
+    public boolean isTariffDatabaseDown() { return discountEngine.isTariffDatabaseDown(); }
+    public boolean isLedgerServiceDown() { return balanceManager.isLedgerServiceDown(); }
+
+    public String describeFaults() {
+        return "tariff database: " + (isTariffDatabaseDown() ? "DOWN" : "up")
+                + " | ledger service: " + (isLedgerServiceDown() ? "DOWN" : "up");
+    }
+
+    /** Deletes all persisted state of all three subsystems (balances go back to zero). */
+    public void resetStore() {
+        tapRepo.clear();
+        fareRepo.clear();
+        ledgerRepo.clear();
+    }
+
+    private void printChain(TapRecord tap) {
+        System.out.println("A  Tap    " + tap.getTapId() + " | card " + tap.getCardId() + " | " + tap.getStatus());
+
+        FareCalculation fare = fareRepo.findByTapId(tap.getTapId());
+        System.out.println(fare == null
+                ? "B  Fare   (none)"
+                : "B  Fare   " + fare.getCalculationId() + " | final " + fare.getFinalFare() + " | " + fare.getStatus());
+
+        LedgerTransaction tx = ledgerRepo.findByTapId(tap.getTapId());
+        System.out.println(tx == null
+                ? "C  Ledger (none)"
+                : "C  Ledger " + tx.getTransactionId() + " | amount " + tx.getAmount() + " | " + tx.getStatus());
     }
 }
