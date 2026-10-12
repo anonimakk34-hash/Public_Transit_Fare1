@@ -51,73 +51,7 @@ The menu header always shows the current fault switches.
 
 ## Architecture
 
-```mermaid
-classDiagram
-    class Main
-    class TransitSystem
-    class TransitOperationalFacade {
-        +processJourney(cardId) String
-        +topUp(cardId, amount) double
-        +getBalance(cardId) double
-        +rollbackChain(tapId) String
-        +recoverPendingChains() List
-    }
-    class TransitAdminFacade {
-        +inspectCardHistory(cardId)
-        +inspectChain(tapId)
-        +forceSystemRollback(tapId) String
-        +setTariffDatabaseDown(down)
-        +setLedgerServiceDown(down)
-        +resetStore()
-    }
-    class CardValidator
-    class TapRecord
-    class TapRepository
-    class TapState
-    class InvalidCardException
-    class DiscountEngine
-    class FareCalculation
-    class FareRepository
-    class FareState
-    class PricingTimeoutException
-    class BalanceManager
-    class LedgerTransaction
-    class LedgerRepository
-    class LedgerState
-    class InsufficientFundsException
-
-    Main --> TransitSystem
-    TransitSystem --> TransitOperationalFacade
-    TransitSystem --> TransitAdminFacade
-    TransitAdminFacade --> TransitOperationalFacade : manual rollback
-
-    TransitOperationalFacade --> CardValidator
-    TransitOperationalFacade --> TapRepository
-    TransitOperationalFacade --> DiscountEngine
-    TransitOperationalFacade --> FareRepository
-    TransitOperationalFacade --> BalanceManager
-    TransitOperationalFacade --> LedgerRepository
-    TransitAdminFacade --> TapRepository
-    TransitAdminFacade --> FareRepository
-    TransitAdminFacade --> LedgerRepository
-    TransitAdminFacade --> DiscountEngine : fault switch
-    TransitAdminFacade --> BalanceManager : fault switch
-
-    CardValidator ..> TapRecord : creates
-    CardValidator ..> InvalidCardException : throws
-    TapRepository o-- TapRecord
-    TapRecord --> TapState
-
-    DiscountEngine ..> FareCalculation : creates
-    DiscountEngine ..> PricingTimeoutException : throws
-    FareRepository o-- FareCalculation
-    FareCalculation --> FareState
-
-    BalanceManager ..> LedgerTransaction : creates
-    BalanceManager ..> InsufficientFundsException : throws
-    LedgerRepository o-- LedgerTransaction
-    LedgerTransaction --> LedgerState
-```
+<img width="8191" height="3126" alt="Sample Label Flow-2026-10-12-050743" src="https://github.com/user-attachments/assets/055833bb-9d36-4a89-89bc-ce56b5af9289" />
 
 **Subsystems.** Each has 5 types: a business-logic class (`CardValidator`, `DiscountEngine`,
 `BalanceManager`), an entity with its own state machine (`TapRecord`, `FareCalculation`,
